@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+logs/
+bench/data/
+bench/results_raw.txt
+aidet/models/
+bench/*_raw.txt
+aidet/model_v2_single.json
