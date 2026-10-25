@@ -1,0 +1,12 @@
+[Unit]
+Description=AI-text detector (Binoculars + Desklib + Fakespot ensemble)
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/ai-detector
+ExecStart=/opt/ai-detector/.venv/bin/python server.py
+Environment=AIDET_HOST=127.0.0.1 AIDET_PORT=8790 AIDET_IDLE_MIN=15 TOKENIZERS_PARALLELISM=false
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
