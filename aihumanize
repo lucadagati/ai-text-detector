@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Humanizer + detector loop: aihumanize FILE -o OUT [--sample MY_TEXT] [--rounds N] [--tracked OUT.tex] [--dry-run]
+# Needs the running service (AIDET_URL) and the `claude` CLI. See humanize.py.
+d="$(dirname "$(readlink -f "$0")")"
+exec "$d/.venv/bin/python" "$d/humanize.py" "$@"

@@ -1,0 +1,9 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 130
+extend-exclude = [".venv", "bench"]
+
+[tool.ruff.lint]
+select = ["F", "E9"]

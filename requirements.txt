@@ -1,0 +1,12 @@
+torch>=2.2
+transformers>=4.44,<4.50
+accelerate
+huggingface_hub
+sentencepiece
+protobuf
+scikit-learn
+numpy
+fastapi
+uvicorn[standard]
+pydantic>=2
+spacy>=3.7,<3.9
