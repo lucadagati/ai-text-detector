@@ -4,7 +4,7 @@ Local service that estimates whether academic text (plain, Markdown or LaTeX) wa
 paragraph by paragraph and sentence by sentence, and explains the verdict with the sentence-structure traits
 that set the text apart from human papers.
 
-**v4.2 at a glance.** All numbers are at 1% false positives on held-out papers; details in [`bench/RESULTS.md`](bench/RESULTS.md).
+**v4.3 at a glance (numbers from the v4.2 benchmark; not re-run here).** All numbers are at 1% false positives on held-out papers; details in [`bench/RESULTS.md`](bench/RESULTS.md).
 
 | | Claude | AI-polished human text | RAID (11 generators, clean / attacked) | False positives |
 |---|---|---|---|---|
@@ -14,6 +14,25 @@ that set the text apart from human papers.
 | other open detectors (RADAR, academic/ChatGPT/OpenAI RoBERTa) | 0-17% | 0-6% | - | 1% |
 
 Claude models left out of training entirely are still detected at 95%.
+
+## Contents
+
+1. [How it works](#how-it-works)
+2. [Install](#install)
+3. [Run the server](#run-the-server)
+4. [Use the CLI and the API](#use-the-cli-and-the-api)
+5. [Revise a manuscript](#revise-a-manuscript)
+6. [Humanizer loop](#humanizer-loop)
+7. [Tests](#tests)
+8. [Benchmark reproduction](#benchmark-and-retraining-bench)
+9. [Troubleshooting](#troubleshooting)
+10. [Limits](#limits)
+
+**Verification status.** In the environment where this README was last checked (Linux, Python 3.10, one shared GPU) these were run
+and worked: `pytest` (10 passed), `ruff check .`, server start and `/api/health`, the web page (`GET /` returns 200), the start of the first-request download of
+the model weights from Hugging Face (first model fetched, the rest interrupted), `aidetect` on stdin with `--fail-above` (exit 0 / exit 1, also with `--json`) against a running service, and
+`aihumanize --dry-run`. Not verified in this environment: the Docker image, the systemd unit on a fresh host, CPU-only
+inference, the `aihumanize` rewrite rounds (they need the `claude` CLI and were not re-run), and every bench script and benchmark number below.
 
 ## How it works
 
@@ -43,42 +62,68 @@ Claude models left out of training entirely are still detected at 95%.
 
 ## Install
 
-Needs Python 3.10+ and about 3 GB of GPU memory (it also runs on CPU, more slowly). The three trained classifiers
-(735 MB each) are published at [huggingface.co/Lukkinen/ai-text-detector](https://huggingface.co/Lukkinen/ai-text-detector)
-and downloaded into `aidet/models/` on the first request (set `AIDET_HF_REPO` to use another copy).
+Needs Python 3.10+, about 3 GB of GPU memory (CPU-only should work but is slower and was not verified) and about 2.2 GB of disk for the
+three classifiers (735 MB each). The weights are not in this repository: they are published at
+[huggingface.co/Lukkinen/ai-text-detector](https://huggingface.co/Lukkinen/ai-text-detector) and downloaded into `aidet/models/` on the first request
+(set `AIDET_HF_REPO` to use another copy).
 
 ```bash
 git clone https://github.com/lucadagati/ai-text-detector && cd ai-text-detector
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python -m spacy download en_core_web_md
-.venv/bin/python server.py                       # http://127.0.0.1:8790
-# as a service: edit the paths in ai-detector.service, then
-sudo cp ai-detector.service /etc/systemd/system/ && sudo systemctl enable --now ai-detector
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m spacy download en_core_web_md     # sentence-structure profile
 ```
 
-## Use
+The client scripts (`aidetect`, `score_tex.py`, `humanize.py`, `track_changes.py`) use only the standard library; `aidetect` and `aihumanize`
+use `.venv/bin/python` if it exists and `python3` otherwise.
+
+## Run the server
 
 ```bash
-# CI / pre-commit gate: exit 1 if more than 20% of the words are labelled ai
-./aidetect paper/sections/ --fail-above 20
-echo "some text" | ./aidetect -        # from stdin
+.venv/bin/python server.py                 # http://127.0.0.1:8790
+curl -s localhost:8790/api/health          # {"status":"ok","loaded":false,...}
+```
 
-# web page: open http://127.0.0.1:8790 (from VS Code Remote, forward port 8790)
+The models load on the first `/api/detect` request (about a minute, plus the weight download the very first time) and are released after
+15 idle minutes, because the GPU is meant to be shared. The service scores all windows of a document in one length-sorted pass and caches scores
+per model. Settings are environment variables:
 
-# command line
-./aidetect paper/sections/           # every .tex/.md/.txt in the folder
-./aidetect main.tex --top 10
-./aidetect draft.md --json
+| Variable | Default | Meaning |
+|---|---|---|
+| `AIDET_HOST`, `AIDET_PORT` | `127.0.0.1`, `8790` | bind address. The API has no authentication: do not expose it publicly |
+| `AIDET_IDLE_MIN` | `15` | idle minutes before the models are unloaded |
+| `AIDET_CACHE` | `20000` | cached scores per model |
+| `AIDET_MAX_CHARS` | `2000000` | larger requests get HTTP 413 |
+| `AIDET_HF_REPO` | `Lukkinen/ai-text-detector` | where the weights are fetched from |
+| `AIDET_URL` | `http://127.0.0.1:8790` | used by the clients (CLI, `score_tex.py`, `humanize.py`) |
 
-# per paragraph, with source line numbers and the most AI-like sentences (for revising a manuscript)
+**As a systemd service:** edit `WorkingDirectory` and `ExecStart` in `ai-detector.service` to your checkout, then
+`sudo cp ai-detector.service /etc/systemd/system/ && sudo systemctl enable --now ai-detector` (not verified on a fresh host).
+
+**With Docker (GPU host):** `docker build -t ai-text-detector .` then
+`docker run --gpus all -p 127.0.0.1:8790:8790 -v aidet-models:/app/aidet/models ai-text-detector` (not verified).
+
+**Remote use:** forward the port (for example VS Code Remote, or `ssh -L 8790:127.0.0.1:8790 host`) rather than binding to a public address.
+
+## Use the CLI and the API
+
+The CLI talks to a running server and starts nothing itself.
+
+```bash
+./aidetect paper/sections/                 # every .tex/.md/.txt in the folder, most AI-like paragraphs first
+./aidetect main.tex --top 10 --sentences   # also the most AI-like sentences of flagged paragraphs
+./aidetect draft.md --json                 # raw JSON, one object per file
+echo "some text" | ./aidetect -            # from stdin
+./aidetect paper/sections/ --fail-above 20 # exit 1 if more than 20% of the words are labelled ai (CI / pre-commit gate)
+
+# per paragraph with source line numbers, for revising a manuscript
 .venv/bin/python score_tex.py paper/sections/introduction.tex --sentences --only-flagged
 
-# API
+# API; the web page at http://127.0.0.1:8790 does the same interactively
 curl -s localhost:8790/api/detect -H 'Content-Type: application/json' -d '{"text": "..."}'
 ```
 
-The model loads on the first request and is released after 15 idle minutes (`AIDET_IDLE_MIN`).
-The CLI and `score_tex.py` talk to the service at `AIDET_URL` (default `http://127.0.0.1:8790`).
+Paragraphs under 40 words are not assessed (`--min-words` / `min_words` changes that), so a very short text returns `too short`.
 
 ### API response
 
@@ -89,14 +134,8 @@ The CLI and `score_tex.py` talk to the service at `AIDET_URL` (default `http://1
 - `structure_traits[]`, the traits farthest from human papers (`trait`, `value`, `human_mean`, `z`);
 - `thresholds`, `sentence_threshold` (1% level) and `sentence_threshold_5` (5% level).
 
-### Remote use
+## Revise a manuscript
 
-The service listens on `127.0.0.1` only. From another machine, forward the port with VS Code Remote
-or `ssh -L 8790:localhost:8790 <host>`, then use `http://localhost:8790` and set `AIDET_URL` if needed.
-To serve a private network instead, set `AIDET_HOST` (for example, a Tailscale address). The API has no
-authentication, so do not expose it publicly.
-
-### Revising a manuscript with tracked changes
 
 `track_changes.py OLD.tex NEW.tex OUT.tex` writes NEW as a `changes`-package layer (`\added`, `\deleted`,
 `\replaced`) over OLD, sentence by sentence. Paragraphs are aligned in order: similar ones are diffed, and
@@ -104,14 +143,37 @@ paragraphs that exist only in NEW (or only in OLD) have their prose wrapped in `
 Environments and structural commands stay outside the markup; a changed table or figure is written as in NEW
 (mark its new cells or caption by hand with `\added`), and `\cite`/`\Cref`/`\ref` in deleted text are protected with `\mbox`.
 Citations that survive only in deleted text still need their BibTeX entries until the changes are accepted.
-With `\\usepackage[final]{changes}` the package expands added text, which fails on `\\emph` followed by `\\cite`; to print the clean text, redefine `\\added`, `\\deleted` and `\\replaced` instead (accept: `#2`, nothing, `#2`). A typical loop:
+With `\usepackage[final]{changes}` the package expands added text, which fails on `\emph` followed by `\cite`; to print the clean text, redefine `\added`, `\deleted` and `\replaced` instead (accept: `#2`, nothing, `#2`). A typical loop:
 1. Score the clean text with `score_tex.py`.
 2. Revise the flagged paragraphs and score them again.
 3. Generate the tracked file against the original with `track_changes.py`.
 
-### Humanizing with the detector in the loop
+## Humanizer loop
 
-`aihumanize FILE -o OUT` (wrapper of `humanize.py`) rewrites the flagged paragraphs with the [humanizer](https://github.com/blader/humanizer) rules (rules vendored in `humanizer/`, MIT) and rescores each candidate here, keeping numbers, citations and math fixed. `--sample` matches your own voice, `--dry-run` only scores, `--tracked OUT.tex` adds a `changes` layer over the original. Candidates that change numbers, `\cite`/`\ref` keys or math, or grow by more than 25%, are discarded.
+`aihumanize FILE -o OUT` (wrapper of `humanize.py`) rewrites the flagged paragraphs with the [humanizer](https://github.com/blader/humanizer) rules
+(vendored in `humanizer/`, MIT) through the `claude` CLI and rescores each candidate on the running server, keeping numbers, citations and math fixed.
+
+```bash
+./aihumanize paper/sections/intro.tex --dry-run                      # only score, nothing is written
+./aihumanize paper/sections/intro.tex -o /tmp/intro.humanized.tex    # rewrite flagged paragraphs, up to 4 rounds each
+./aihumanize intro.tex -o out.tex --sample my_text.tex --tracked intro.tracked.tex   # match your voice, add a `changes` layer
+```
+
+Options: `--rounds N`, `--model` (default `sonnet`), `--all` (also paragraphs already `human`), `--jobs` (parallel paragraphs, default 3),
+`--inplace` (overwrite; incompatible with `--tracked`). Candidates that change numbers, `\cite`/`\ref` keys or inline math, or grow by more than
+25%, are discarded. The result is optimized against this detector only: a passing score is not proof of human authorship, so check the structure
+distance in `aidetect` output and read the text.
+
+## Tests
+
+```bash
+.venv/bin/pip install pytest httpx ruff
+.venv/bin/python -m pytest -q      # 10 tests, no GPU or weights needed
+.venv/bin/ruff check .
+```
+
+CI (`.github/workflows/ci.yml`) runs the same two commands. The tests cover text preparation, paragraph splitting, the humanizer invariants, `score_tex.blocks`,
+`track_changes.py`, the server limits (413/422) and the document verdict rules, plus the `--fail-above` gate of the CLI.
 
 ## Benchmark and retraining (`bench/`)
 
@@ -129,17 +191,22 @@ With `\\usepackage[final]{changes}` the package expands added text, which fails 
 
 The benchmark texts are not redistributed, because they contain arXiv content. The scripts rebuild them.
 
-## Development
+To reproduce a result, start from `bench/RESULTS.md` (results by version, with the scripts named in the text). Data collection and
+training need network access, the `claude` CLI and/or Ollama for generation, and a GPU; none of these scripts was re-run for this README.
 
-```bash
-.venv/bin/pip install pytest httpx ruff
-.venv/bin/python -m pytest -q      # no GPU or weights needed
-.venv/bin/ruff check .
-```
+## Troubleshooting
 
-The service scores all windows of a document in one length-sorted pass and caches scores per model
-(`AIDET_CACHE` entries, default 20000), so rescoring a lightly edited text is fast. Requests above
-`AIDET_MAX_CHARS` (2M) get 413. A `Dockerfile` is included for GPU hosts.
+| Symptom | Cause / fix |
+|---|---|
+| `service not reachable at http://127.0.0.1:8790` | the server is not running (`python server.py` or `systemctl start ai-detector`), or `AIDET_URL` is wrong |
+| first request takes minutes or fails | the weights are being downloaded (about 2.2 GB) into `aidet/models/`; check network access to huggingface.co or set `AIDET_HF_REPO` |
+| CUDA out of memory | other jobs on the GPU; the service needs about 3 GB. Wait for the idle unload, or stop the other job |
+| HTTP 413 | text above `AIDET_MAX_CHARS` |
+| HTTP 422 | the text could not be parsed as LaTeX (for example unbalanced braces); pass `"latex": false` or fix the source |
+| verdict `too short` | no paragraph reached `min_words` (40) after math, figures and tables were removed |
+| `No module named spacy` / missing `en_core_web_md` | run the spacy download line of the install step |
+| `aihumanize`: `empty output` | the `claude` CLI is missing or not logged in |
+| `ModuleNotFoundError: fastapi` for `server.py` | install `requirements.txt` into the same Python that runs it |
 
 ## Limits
 

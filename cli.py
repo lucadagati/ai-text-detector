@@ -20,6 +20,8 @@ def main():
             files.append("-")
             continue
         files += sorted(f for e in ("tex", "md", "txt") for f in glob.glob(os.path.join(p, f"*.{e}"))) if os.path.isdir(p) else [p]
+    if not files:
+        sys.exit("no .tex/.md/.txt files found")
     tot = {"ai": 0.0, "uncertain": 0.0, "human": 0.0}
     for f in files:
         text = sys.stdin.read() if f == "-" else open(f, encoding="utf-8", errors="replace").read()
@@ -32,13 +34,13 @@ def main():
             sys.exit(f"{f}: service error {e.code}: {e.read().decode()[:200]}")
         except OSError as e:
             sys.exit(f"service not reachable at {URL} ({e}); start it with: systemctl start ai-detector")
-        if a.json:
-            print(json.dumps({"file": f, **d}))
-            continue
         s = d["share_words"]
         words = sum(p["words"] for p in d["paragraphs"])
         for k in tot:
             tot[k] += s[k] * words
+        if a.json:
+            print(json.dumps({"file": f, **d}))
+            continue
         print(f"\n{os.path.basename(f)}: {d['verdict'].upper()}  (AI {s['ai']:.0%}, uncertain {s['uncertain']:.0%}, "
               f"human {s['human']:.0%} of words; {d['n_paragraphs']} paragraphs)")
         for p in sorted(d["paragraphs"], key=lambda p: -p["score"])[:a.top]:
@@ -56,12 +58,11 @@ def main():
             print("   structure far from human papers: " + "; ".join(
                 f"{t['trait']} {t['value']} (human {t['human_mean']})" for t in traits))
     w = sum(tot.values()) or 1
+    if not a.json and len(files) > 1:
+        print(f"\nALL FILES: AI {tot['ai']/w:.0%}, uncertain {tot['uncertain']/w:.0%}, human {tot['human']/w:.0%} of words")
     if a.fail_above is not None and tot["ai"] / w * 100 > a.fail_above:
         print(f"FAIL: {tot['ai']/w:.0%} of words labelled ai (limit {a.fail_above:g}%)", file=sys.stderr)
         sys.exit(1)
-    if not a.json and len(files) > 1:
-        w = sum(tot.values()) or 1
-        print(f"\nALL FILES: AI {tot['ai']/w:.0%}, uncertain {tot['uncertain']/w:.0%}, human {tot['human']/w:.0%} of words")
 
 
 if __name__ == "__main__":

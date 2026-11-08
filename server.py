@@ -99,7 +99,7 @@ function render(){const d=D,s=d.share_words,pc=x=>(100*x).toFixed(0)+'%';
   h+=`<div class="p ${p.label}"><div class="meta"><b>${p.label}</b> · score ${p.score.toFixed(2)} · paragraph ${p.i+1} · ${Object.entries(g).map(([k,v])=>k+' '+v).join(' · ')}</div>${body}</div>`}
  $('#out').innerHTML=h;$('#o1').onclick=()=>{order='doc';render()};$('#o2').onclick=()=>{order='score';render()}}
 $('#go').onclick=async()=>{const text=$('#t').value;if(!text.trim())return;$('#st').textContent='Analyzing (the first run loads the models, about a minute)...';$('#out').innerHTML='';
- try{const r=await fetch('api/detect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});D=await r.json();render();$('#st').textContent=''}catch(e){$('#st').textContent='Error: '+e}};
+ try{const r=await fetch('api/detect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text})});if(!r.ok){const e=await r.json().catch(()=>({}));throw new Error(e.detail||r.status)}D=await r.json();render();$('#st').textContent=''}catch(e){$('#st').textContent='Error: '+e}};
 </script></body></html>"""
 
 if __name__ == "__main__":

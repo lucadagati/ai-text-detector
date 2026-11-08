@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # CLI client of the ai-detector service.
-#   aidetect FILE_OR_DIR... [--top N] [--json]
+#   aidetect FILE_OR_DIR... [--top N] [--json] [--fail-above PCT]
 # Uses the running service (AIDET_URL, default http://127.0.0.1:8790); starts nothing itself.
-exec "$(dirname "$(readlink -f "$0")")/.venv/bin/python" "$(dirname "$(readlink -f "$0")")/cli.py" "$@"
+d="$(dirname "$(readlink -f "$0")")"
+py="$d/.venv/bin/python"; [ -x "$py" ] || py=python3   # the client only needs the standard library
+exec "$py" "$d/cli.py" "$@"

@@ -84,3 +84,24 @@ def test_document_verdict_rules(monkeypatch):
     assert verdict(["ai"] * 3 + ["human"] * 17).startswith("mixed")
     assert verdict(["ai"] * 3 + ["human"] * 7) == "likely AI-generated"
     assert verdict([]) == "too short"
+
+
+def test_cli_fail_above_gate(monkeypatch, capsys):
+    import cli
+
+    class Resp:
+        def read(self):
+            import json
+            p = {"words": 50, "score": 2.0, "label": "ai", "text": "x", "sentences": []}
+            return json.dumps({"verdict": "likely AI-generated", "share_words": {"ai": 1.0, "uncertain": 0.0, "human": 0.0},
+                               "n_paragraphs": 1, "paragraphs": [p], "sentence_threshold_5": 0.0}).encode()
+
+    monkeypatch.setattr(cli.urllib.request, "urlopen", lambda *a, **k: Resp())
+    monkeypatch.setattr(sys, "stdin", types.SimpleNamespace(read=lambda: "text"))
+    for extra in ([], ["--json"]):
+        monkeypatch.setattr(sys, "argv", ["aidetect", "-", "--fail-above", "20", *extra])
+        with pytest.raises(SystemExit) as e:
+            cli.main()
+        assert e.value.code == 1
+    monkeypatch.setattr(sys, "argv", ["aidetect", "-", "--fail-above", "100"])
+    cli.main()
