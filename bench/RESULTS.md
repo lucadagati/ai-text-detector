@@ -313,3 +313,49 @@ leave LD7 unchanged, keep the false positives at the same level, and lose 2 to 3
 small and the detection of a revised unseen manuscript stays at 74% for LD9, below the 90% I proposed as a target,
 so `rev2` stays the published model. More manuscripts of this kind would probably help slowly; with one author and one revision
 procedure, that is also where the risk of fitting the style of these papers grows.
+
+## Humanizer: which model should rewrite? (2026-11-27)
+
+Script: [`humanizer_models.py`](humanizer_models.py) (written from the one-off script that produced these numbers; not re-run after the clean-up).
+Setup: 8 paragraphs flagged `ai` or `uncertain` from two sections of one LaTeX manuscript (LD1 sections 03 and 09, paragraphs under 30% inline math),
+one rewrite per model with the same prompt (academic guidelines, compact humanizer rules, measured structure gaps). Local models ran through
+Ollama on a shared 46 GB GPU, one at a time. "Drop" is the paragraph score before minus after, so positive means a lower AI score; it is averaged over
+the accepted rewrites only. n = 8 per model: differences below about 0.3 are noise.
+
+| model | accepted (of 8) | mean drop | reached `human` | seconds per call | rejected for |
+|---|---|---|---|---|---|
+| qwen2.5:7b | 2 | +0.16 | 0 | 30 | changed numbers/refs/math 5, lint 1 |
+| llama3.1:8b | 2 | +0.04 | 0 | 28 | numbers/refs/math 4, lint 2 |
+| gemma3:12b | 5 | -0.68 | 0 | 44 | numbers/refs/math 2, lint 1 |
+| qwen2.5:14b | 3 | -0.29 | 0 | 47 | numbers/refs/math 3, lint 1, growth 1 |
+| phi4:14b | 1 | -1.73 | 0 | 52 | numbers/refs/math 6, lint 1 |
+| mistral-small:24b | 6 | +0.17 | 1 | 70 | numbers/refs/math 2 |
+| gpt-oss:20b | 4 | -0.47 | 0 | 35 | numbers/refs/math 2, lint 2 |
+| claude haiku | 8 | -0.09 | 0 | 11 | none |
+| claude sonnet | 8 | -0.17 | 0 | 6 | none |
+| claude opus | 8 | -0.13 | 1 | 12 | none |
+
+Findings.
+- Local models fail the guards: most rewrites change a number, a `\cite`/`\ref` key or inline math, so the guard discards them. Only mistral-small
+  is usable, and it is the slowest and takes 11 GB of a shared GPU. The three Claude models are accepted 8 of 8 times.
+- One rewrite does not lower the score for any model (mean drop within noise, mostly slightly negative). Opus is not better than sonnet in a single
+  round and grows the text more (+7% against +1-4%), so the humanizer defaults to sonnet alone.
+- What does help is selection: several candidates per round, each rescored, keeping the lowest valid one, with the measured structure gaps of the
+  paragraph in the prompt (next section).
+
+### Sonnet with best-of-3 and measured structure gaps, one manuscript section
+
+Same section (LD1 `03-execution-gap.tex`, 14 paragraphs flagged before), whole-section run, `humanize.py` defaults (sonnet, 3 candidates, up to 3 rounds):
+
+| | opus, previous prompt (1 candidate, 3 rounds) | sonnet, structure gaps + best-of-3 |
+|---|---|---|
+| reached `human` | 1 | 2 |
+| `ai` -> `uncertain` | 0 | 1 |
+| lower score, still `ai` | 5 | 7 |
+| no gain | 5 | 4 |
+| rejected by the guards | 3 | 0 |
+| words | 3616 -> 3726 | 3616 -> 3702 |
+
+Five of the rewritten paragraphs were read against the originals: four kept the meaning, one added a causal link the original did not have
+("Therefore ...") and an awkward parenthesis. The paragraphs that stay `ai` are dense with definitions and formulas; extra rounds there start to
+degrade the prose, and the guards do not measure that. This is one section of one manuscript.

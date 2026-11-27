@@ -29,10 +29,10 @@ Claude models left out of training entirely are still detected at 95%.
 10. [Limits](#limits)
 
 **Verification status.** In the environment where this README was last checked (Linux, Python 3.10, one shared GPU) these were run
-and worked: `pytest` (10 passed), `ruff check .`, server start and `/api/health`, the web page (`GET /` returns 200), the start of the first-request download of
-the model weights from Hugging Face (first model fetched, the rest interrupted), `aidetect` on stdin with `--fail-above` (exit 0 / exit 1, also with `--json`) against a running service, and
-`aihumanize --dry-run`. Not verified in this environment: the Docker image, the systemd unit on a fresh host, CPU-only
-inference, the `aihumanize` rewrite rounds (they need the `claude` CLI and were not re-run), and every bench script and benchmark number below.
+and worked: `pytest` (15 passed), `ruff check .`, server start and `/api/health`, the web page (`GET /` returns 200), the start of the first-request download of
+the model weights from Hugging Face (first model fetched, the rest interrupted), `aidetect` on stdin with `--fail-above` (exit 0 / exit 1, also with `--json`) against a running service,
+`aihumanize --dry-run`, and the humanizer rewrite loop with `claude -p` on one manuscript section (14 flagged paragraphs) and on a single paragraph. Not verified in this environment:
+the Docker image, the systemd unit on a fresh host, CPU-only inference, `bench/humanizer_models.py` after its clean-up, and every other bench script and benchmark number below.
 
 ## How it works
 
@@ -150,29 +150,58 @@ With `\usepackage[final]{changes}` the package expands added text, which fails o
 
 ## Humanizer loop
 
-`aihumanize FILE -o OUT` (wrapper of `humanize.py`) rewrites the flagged paragraphs with the [humanizer](https://github.com/blader/humanizer) rules
-(vendored in `humanizer/`, MIT) through the `claude` CLI and rescores each candidate on the running server, keeping numbers, citations and math fixed.
+`aihumanize FILE -o OUT` (wrapper of `humanize.py`) rewrites the flagged paragraphs with `claude -p` (default model: `sonnet`, no GPU needed)
+and rescores every candidate on the running server. It is built to improve the prose first and the score second.
 
 ```bash
 ./aihumanize paper/sections/intro.tex --dry-run                      # only score, nothing is written
-./aihumanize paper/sections/intro.tex -o /tmp/intro.humanized.tex    # rewrite flagged paragraphs, up to 4 rounds each
+./aihumanize paper/sections/intro.tex -o /tmp/intro.humanized.tex    # rewrite flagged paragraphs
 ./aihumanize intro.tex -o out.tex --sample my_text.tex --tracked intro.tracked.tex   # match your voice, add a `changes` layer
 ```
 
-Options: `--rounds N`, `--model` (default `sonnet`), `--all` (also paragraphs already `human`), `--jobs` (parallel paragraphs, default 3),
-`--inplace` (overwrite; incompatible with `--tracked`). Candidates that change numbers, `\cite`/`\ref` keys or inline math, or grow by more than
-25%, are discarded. The result is optimized against this detector only: a passing score is not proof of human authorship, so check the structure
-distance in `aidetect` output and read the text.
+**What goes into each rewrite prompt**
+1. [`humanizer/ACADEMIC.md`](humanizer/ACADEMIC.md): academic writing guidelines that win over every other rule. Rhythm follows content; cut
+   redundancy; drop stock formulas ("it is important to note", "plays a crucial role", "in this context"); no forced triads; specific over generic;
+   fixed terminology (never swap a technical term, acronym or variable name for a synonym); no colloquialisms, anecdotes or invented opinions; never change the scientific meaning.
+2. A compact digest of the [humanizer](https://github.com/blader/humanizer) patterns ([`humanizer/COMPACT.md`](humanizer/COMPACT.md), about 1 KB). The full
+   vendored rules (`humanizer/SKILL.md`, MIT, 32 KB) are sent only with `--full-rules`.
+3. **Measured structure gaps** of that paragraph, taken from the detector's structure profile: every trait with |z| >= 1.5 against human papers becomes one
+   instruction with the numbers, e.g. `passive %: 60.0 vs human papers 33.9 -> turn passives into active clauses with a named subject`, or, for a trait
+   below the human mean, the opposite instruction. 21 traits are covered (`DIRECT` in `humanize.py`).
+4. The three most AI-like sentences, and your own writing sample if you pass `--sample`.
+
+**Each round** generates `--candidates` rewrites (default 3), discards the ones that break a guard, rescores the rest and keeps the lowest score. It stops at
+`human`, after `--rounds` rounds (default 3), or after two rounds without gain. A candidate is discarded if it:
+- changes a number, a `\cite`/`\ref`/`\Cref`/`\label` key or an inline math expression;
+- grows by more than 25% of the words, or lengthens the mean sentence by more than 35%;
+- adds a stock formula, a hype word (*robust, novel, significantly, ...*) or a contraction, or loses a technical term, acronym, identifier or `\texttt`/`\emph` term
+  (`academic_lint.py`, deterministic).
+
+Flagged paragraphs with more than 30% of their characters in inline math are skipped (`--max-math`): the detector reads them poorly and a rewrite rarely helps.
+At the end it prints the calls per model and the lint counts before and after.
+
+Options: `--rounds N`, `--candidates N`, `--model` (a comma list of tiers, cheapest first, e.g. `sonnet,opus`; `ollama:NAME` runs a local model), `--budget opus=15` (cap on a tier's
+rounds), `--max-math`, `--full-rules`, `--all` (also paragraphs already `human`), `--jobs` (parallel paragraphs, default 3), `--inplace` (overwrite; incompatible with `--tracked`).
+A paragraph moves to the next tier only after a round without gain.
+
+**Choice of model.** A comparison of ten models on the same paragraphs ([`bench/RESULTS.md`](bench/RESULTS.md), last section) found that local models mostly fail the
+guards (they change numbers, references or math), that sonnet, haiku and opus are all accepted every time, and that opus is not better than sonnet in one round. The default is
+therefore sonnet with best-of-3; opus and local models stay available as options. On one manuscript section (14 flagged paragraphs) this reached `human` on 2, `uncertain` on 1 and lowered the
+score of 7 more, against 1, 0 and 5 for opus with the earlier single-candidate prompt.
+
+**What it cannot do.** Dense, formula-heavy paragraphs often stay `ai`, and extra rounds there start to damage the prose, which no guard measures. Read the result: in a check of five
+rewrites, four kept the meaning and one added a causal link the original did not make. The score is optimized against this detector only, so a passing score is not proof of human
+authorship; look at the structure distance in the `aidetect` output, use `--tracked` and review every change. Check the AI-use policy of your venue before submitting revised text.
 
 ## Tests
 
 ```bash
 .venv/bin/pip install pytest httpx ruff
-.venv/bin/python -m pytest -q      # 10 tests, no GPU or weights needed
+.venv/bin/python -m pytest -q      # 15 tests, no GPU or weights needed
 .venv/bin/ruff check .
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same two commands. The tests cover text preparation, paragraph splitting, the humanizer invariants, `score_tex.blocks`,
+CI (`.github/workflows/ci.yml`) runs the same two commands. The tests cover text preparation, paragraph splitting, the humanizer invariants, prompt and structure directives, tier budgets, the academic lint, `score_tex.blocks`,
 `track_changes.py`, the server limits (413/422) and the document verdict rules, plus the `--fail-above` gate of the CLI.
 
 ## Benchmark and retraining (`bench/`)
